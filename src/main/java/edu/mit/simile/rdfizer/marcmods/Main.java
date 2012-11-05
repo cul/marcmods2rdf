@@ -5,10 +5,12 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 
 import javax.xml.transform.Result;
 import javax.xml.transform.Source;
+import javax.xml.transform.TransformerException;
 import javax.xml.transform.dom.DOMResult;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -20,7 +22,6 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
 import org.marc4j.MarcStreamReader;
-import org.marc4j.MarcStreamWriter;
 import org.marc4j.MarcXmlWriter;
 import org.marc4j.marc.Record;
 import org.w3c.dom.Document;
@@ -153,21 +154,16 @@ public class Main {
             System.err.println("Unexpected exception:" + exp.getMessage());
         }
 
-        MarcStreamReader reader = new MarcStreamReader(new BufferedInputStream(new FileInputStream(input)));
-
         predicted_slots = count / slot_size;
 
-        MarcStreamWriter streamWriter = null;
         MarcXmlWriter xmlWriter = null;
         Record record = null;
 
-        File marc = null;
         File marcxml = null;
         File modsxml = null;
         File modsrdfxml = null;
 
         Result result = null;
-        OutputStream outputStream;
         Document dom;
         Source source;
 
@@ -182,116 +178,60 @@ public class Main {
         marc2mods = do_modsxml ? new MARC2MODS(transformations) : null;
         mods2rdf = do_modsrdfxml ? new MODS2RDF(transformations) : null;
 
-        while (true) {
-            try {
-                if (counter == 0 || (counter % slot_size == 0 && counter < count - 1) || terminate) {
-                    if (open) {
-                        if (do_marc) {
-                            log(WRITE_MARC);
-                            streamWriter.close();
-                        }
+        SourceIterator sourceIter =  new SourceIterator(
+                                         new MarcStreamReader(new BufferedInputStream(new FileInputStream(input))),
+                                         (do_marc)?basepath:null,
+                                         this, count);
+        sourceIter.setNormalize(normalize);
+        while (sourceIter.hasNext()) {
+           source = sourceIter.next();
+           try {
+               if (do_marcxml || do_modsxml || do_modsrdfxml) {
+                   // serialize the DOM representation of a MARC record in MARCXML
+                   if (do_marcxml) {
+                       marcxml = getPath(basepath, "marc_xml", counter, count, "mrc.xml");
+                       serializeTransform(dom2xml, source, marcxml, this, WRITE_MARCXML);
+                   }
 
-                        if (do_marcxml || do_modsxml || do_modsrdfxml) {
+                   if (do_modsxml || do_modsrdfxml) {
 
-                            // convert the MARC record into an MARCXML DOM
-                            xmlWriter.close();
-                            dom = (Document) ((DOMResult) result).getNode();
-                            source = new DOMSource(dom);
+                       // transform the MARC record into MODS/XML
+                       log(TRANSFORM_MARCXML);
+                       result = new DOMResult();
+                       marc2mods.transform(source, result);
+                       dom = (Document) ((DOMResult) result).getNode();
+                       source = new DOMSource(dom);
 
-                            // serialize the DOM representation of a MARC record in MARCXML
-                            if (do_marcxml) {
-                                log(WRITE_MARCXML);
-                                outputStream = new BufferedOutputStream(new FileOutputStream(marcxml));
-                                result = new StreamResult(outputStream);
-                                dom2xml.transform(source, result);
-                                outputStream.close();
-                            }
+                       // serialize the MODS/XML DOM
+                       if (do_modsxml) {
+                           modsxml = getPath(basepath, "mods_xml", counter, count, "mods.xml");
+                           serializeTransform(dom2xml, source, modsxml, this, WRITE_MODSXML);
+                       }
 
-                            if (do_modsxml || do_modsrdfxml) {
+                       if (do_modsrdfxml) {
+                           // transform the MODS/XML record into MODS/RDF and serialize
+                           modsrdfxml = getPath(basepath, "mods_rdf_xml", counter, count, "mods.rdf.xml");
+                           serializeTransform(mods2rdf, source, modsrdfxml, this, WRITE_MODSRDF);
+                       }
 
-                                // transform the MARC record into MODS/XML
-                                log(TRANSFORM_MARCXML);
-                                result = new DOMResult();
-                                marc2mods.transform(source, result);
-                                dom = (Document) ((DOMResult) result).getNode();
-                                source = new DOMSource(dom);
-
-                                // serialize the MODS/XML DOM
-                                if (do_modsxml) {
-                                    log(WRITE_MODSXML);
-                                    outputStream = new BufferedOutputStream(new FileOutputStream(modsxml));
-                                    result = new StreamResult(outputStream);
-                                    dom2xml.transform(source, result);
-                                    outputStream.close();
-                                }
-
-                                if (do_modsrdfxml) {
-                                    log(TRANSFORM_MODSXML);
-                                    // transform the MODS/XML record into MODS/RDF and serialize
-                                    outputStream = new BufferedOutputStream(new FileOutputStream(modsrdfxml));
-                                    result = new StreamResult(outputStream);
-                                    mods2rdf.transform(source, result);
-                                    log(WRITE_MODSRDF);
-                                    outputStream.close();
-                                }
-                            }
-
-                        }
-
-                        open = false;
-
-                        log(FINISH_SLOT);
-
-                        if (terminate) break;
-
-                        slot++;
-                    }
-
-                    log(START_SLOT);
-
-                    if (do_marc) marc = getPath(basepath, "marc", counter, count, "mrc");
-                    if (do_marcxml) marcxml = getPath(basepath, "marc_xml", counter, count, "mrc.xml");
-                    if (do_modsxml) modsxml = getPath(basepath, "mods_xml", counter, count, "mods.xml");
-                    if (do_modsrdfxml) modsrdfxml = getPath(basepath, "mods_rdf_xml", counter, count, "mods.rdf.xml");
-
-                    if (do_marc)
-                        streamWriter = new MarcStreamWriter(new BufferedOutputStream(new FileOutputStream(marc)));
-
-                    if (do_marcxml || do_modsxml || do_modsrdfxml) {
-                        result = new DOMResult();
-                        xmlWriter = new MarcXmlWriter(result);
-                        if (normalize) xmlWriter.setUnicodeNormalization(true);
-                    }
-
-                    open = true;
-                }
-
-                if (reader.hasNext() && counter < count) {
-                    counter++;
-
-                    record = reader.next();
-                    log(READ);
-
-                    if (do_marc) {
-                        streamWriter.write(record);
-                        log(WRITE);
-                    }
-                    if (do_marcxml || do_modsxml || do_modsrdfxml) {
-                        xmlWriter.write(record);
-                        log(WRITE);
-                    }
-                } else {
-                    terminate = true;
-                }
-            } catch (Exception e) {
-                error("Failed reading record [" + counter + "]", e);
-            }
+                   }
+               }
+           } catch (Exception e) {
+                   error("Failed reading record [" + counter + "]", e);
+           }
         }
-
         log(END);
     }
 
-    File getPath(String base, String type, int counter, int count, String extension) {
+    private static void serializeTransform(AbstractTransform transform, Source input, File output, Main main, int logOp) throws TransformerException, IOException {
+        main.log(logOp);
+        OutputStream outputStream = new BufferedOutputStream(new FileOutputStream(output));
+        Result result = new StreamResult(outputStream);
+        transform.transform(input, result);
+        outputStream.close();
+    }
+
+    static File getPath(String base, String type, int counter, int count, String extension) {
         String counter_str = Integer.toString(counter);
         int counter_len = counter_str.length();
         int count_len = Integer.toString(count).length() - 1;
